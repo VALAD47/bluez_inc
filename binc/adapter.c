@@ -85,6 +85,7 @@ struct binc_adapter {
     guint iface_removed;
 
     AdapterDiscoveryResultCallback discoveryResultCallback;
+    AdapterDeviceRemovalCallback deviceRemovalCallback;
     AdapterDiscoveryStateChangeCallback discoveryStateCallback;
     AdapterPoweredStateChangeCallback poweredStateCallback;
     RemoteCentralConnectionStateCallback centralStateCallback;
@@ -244,7 +245,7 @@ static gboolean matches_discovery_filter(Adapter *adapter, Device *device) {
     if (binc_device_get_rssi(device) < adapter->discovery_filter.rssi) return FALSE;
 
     const char *pattern = adapter->discovery_filter.pattern;
-    if (pattern != NULL && binc_device_get_name(device) != NULL) {
+    if (pattern != NULL) {
         if (!(g_str_has_prefix(binc_device_get_name(device), pattern) ||
               g_str_has_prefix(binc_device_get_address(device), pattern)))
             return FALSE;
@@ -280,6 +281,15 @@ static void deliver_discovery_result(Adapter *adapter, Device *device) {
     }
 }
 
+static void deliver_device_removal(Adapter *adapter, Device *device) {
+   g_assert(adapter != NULL);
+   g_assert(device != NULL);
+
+   if (adapter->deviceRemovalCallback != NULL) {
+       adapter->deviceRemovalCallback(adapter, device);
+   }
+}
+
 static void binc_internal_device_disappeared(__attribute__((unused)) GDBusConnection *conn,
                                              __attribute__((unused)) const gchar *sender_name,
                                              __attribute__((unused)) const gchar *object_path,
@@ -301,6 +311,7 @@ static void binc_internal_device_disappeared(__attribute__((unused)) GDBusConnec
         if (g_str_equal(interface_name, INTERFACE_DEVICE)) {
             log_debug(TAG, "Device %s removed", object);
             if (g_hash_table_lookup(adapter->devices_cache, object) != NULL) {
+  	        deliver_device_removal(adapter, g_hash_table_lookup(adapter->devices_cache, object));
                 g_hash_table_remove(adapter->devices_cache, object);
             }
         }
@@ -330,11 +341,6 @@ static void binc_internal_device_appeared(__attribute__((unused)) GDBusConnectio
     g_variant_get(parameters, "(&oa{sa{sv}})", &object, &interfaces);
     while (g_variant_iter_loop(interfaces, "{&s@a{sv}}", &interface_name, &properties)) {
         if (g_str_equal(interface_name, INTERFACE_DEVICE)) {
-
-            // Skip this device if it is not for this adapter
-            if (!g_str_has_prefix(object, adapter->path))
-                break;
-
             Device *device = binc_device_create(object, adapter);
 
             char *property_name = NULL;
@@ -436,11 +442,9 @@ static void binc_internal_device_changed(__attribute__((unused)) GDBusConnection
 
     Device *device = g_hash_table_lookup(adapter->devices_cache, path);
     if (device == NULL) {
-        if (g_str_has_prefix(path, adapter->path)) {
-            device = binc_device_create(path, adapter);
-            g_hash_table_insert(adapter->devices_cache, g_strdup(binc_device_get_path(device)), device);
-            binc_internal_device_getall_properties(adapter, device);
-        }
+        device = binc_device_create(path, adapter);
+        g_hash_table_insert(adapter->devices_cache, g_strdup(binc_device_get_path(device)), device);
+        binc_internal_device_getall_properties(adapter, device);
     } else {
         gboolean isDiscoveryResult = FALSE;
         ConnectionState oldState = binc_device_get_connection_state(device);
@@ -602,8 +606,6 @@ GPtrArray *binc_adapter_find_all(GDBusConnection *dbusConnection) {
             while (g_variant_iter_loop(&iter2, "{&s@a{sv}}", &interface_name, &properties)) {
                 if (g_str_equal(interface_name, INTERFACE_ADAPTER)) {
                     Adapter *adapter = binc_adapter_create(dbusConnection, object_path);
-                    log_debug(TAG, "found adapter '%s'", object_path);
-
                     char *property_name;
                     GVariantIter iter3;
                     GVariant *property_value;
@@ -921,6 +923,13 @@ void binc_adapter_set_discovery_cb(Adapter *adapter, AdapterDiscoveryResultCallb
     adapter->discoveryResultCallback = callback;
 }
 
+void binc_adapter_set_device_removal_cb(Adapter *adapter, AdapterDeviceRemovalCallback callback) {
+    g_assert(adapter != NULL);
+    g_assert(callback != NULL);
+
+    adapter->deviceRemovalCallback = callback;
+}
+
 void binc_adapter_set_discovery_state_cb(Adapter *adapter, AdapterDiscoveryStateChangeCallback callback) {
     g_assert(adapter != NULL);
     g_assert(callback != NULL);
@@ -980,11 +989,6 @@ GDBusConnection *binc_adapter_get_dbus_connection(const Adapter *adapter) {
 const char *binc_adapter_get_discovery_state_name(const Adapter *adapter) {
     g_assert(adapter != NULL);
     return discovery_state_names[adapter->discovery_state];
-}
-
-Advertisement *binc_adapter_get_advertisement(const Adapter *adapter) {
-    g_assert(adapter != NULL);
-	return adapter->advertisement;
 }
 
 static void binc_internal_start_advertising_cb(__attribute__((unused)) GObject *source_object,
